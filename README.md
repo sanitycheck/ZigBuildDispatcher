@@ -14,6 +14,11 @@ High-performance build dispatcher for Zig projects with concurrent builds, isola
 - .NET 10.0 (projects target `net10.0`).
 - Zig installed (or managed via zvm).
 
+## Install
+```
+dotnet add package ZigBuildDispatcher
+```
+
 ## Quick Start
 ```csharp
 using ZigBuildDispatcher;

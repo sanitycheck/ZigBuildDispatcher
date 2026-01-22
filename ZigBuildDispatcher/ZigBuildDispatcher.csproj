@@ -4,6 +4,23 @@
         <TargetFramework>net10.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+        <PackageId>ZigBuildDispatcher</PackageId>
+        <Version>0.1.0</Version>
+        <Authors>Dustin</Authors>
+        <Description>High-performance build dispatcher for Zig projects with concurrent builds, isolated workspaces, and streamed output.</Description>
+        <PackageTags>zig;build;dispatcher;concurrency</PackageTags>
+        <RepositoryUrl>https://github.com/sanitycheck/ZigBuildDispatcher</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageProjectUrl>https://github.com/sanitycheck/ZigBuildDispatcher</PackageProjectUrl>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="..\README.md" Pack="true" PackagePath="/" />
+        <None Include="..\LICENSE" Pack="true" PackagePath="/" />
+    </ItemGroup>
 
 </Project>
