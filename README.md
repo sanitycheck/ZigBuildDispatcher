@@ -1,3 +1,6 @@
+# WARNING
+This package provides no security guarantees for inputs passed to the build dispatcher; untrusted inputs can lead to code execution. This project is AI-generated/experimental and should be used at your own risk.
+
 # ZigBuildDispatcher
 
 High-performance build dispatcher for Zig projects with concurrent builds, isolated workspaces, and streamed output.
