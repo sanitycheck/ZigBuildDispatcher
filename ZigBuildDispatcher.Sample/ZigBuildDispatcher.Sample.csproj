@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\ZigBuildDispatcher\ZigBuildDispatcher.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="XtermBlazor" Version="2.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="SampleZigProject\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
+  </PropertyGroup>
+
+</Project>

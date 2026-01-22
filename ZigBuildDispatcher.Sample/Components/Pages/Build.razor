@@ -1,0 +1,367 @@
+@page "/build"
+@rendermode InteractiveServer
+@inject BuildDispatcher Dispatcher
+
+<PageTitle>Build</PageTitle>
+
+<h3>Build Console</h3>
+
+<div class="build-panel">
+    <div class="build-options">
+        <div>
+            <label class="form-label">build.zig</label>
+            <input class="form-control" @bind="BuildZigPath" />
+        </div>
+        <div>
+            <label class="form-label">Build arguments</label>
+            <input class="form-control" @bind="BuildArgs" />
+        </div>
+        <div>
+            <label class="form-label">Zig home (optional)</label>
+            <input class="form-control" @bind="ZigHome" />
+        </div>
+        <div>
+            <label class="form-label">Cache key (optional)</label>
+            <input class="form-control" @bind="CacheKey" />
+        </div>
+        <div>
+            <label class="form-label">Workspace key (per tab)</label>
+            <input class="form-control" @bind="WorkspaceKey" disabled="@(ReuseWorkspace == false)" />
+        </div>
+        <div class="form-check">
+            <input id="reuse-workspace" class="form-check-input" type="checkbox" @bind="ReuseWorkspace" />
+            <label class="form-check-label" for="reuse-workspace">Reuse workspace for this tab</label>
+        </div>
+        <div>
+            <label class="form-label">Artifact cleanup</label>
+            <select class="form-select" @bind="ArtifactCleanupMode">
+                <option value="@BuildArtifactCleanupMode.All">All (cache/out/tmp)</option>
+                <option value="@BuildArtifactCleanupMode.OutputOnly">Output only (keep cache)</option>
+                <option value="@BuildArtifactCleanupMode.None">None</option>
+            </select>
+        </div>
+        <div class="form-check">
+            <input id="summary-output" class="form-check-input" type="checkbox" @bind="IncludeSummaryOutput" />
+            <label class="form-check-label" for="summary-output">Include zig summary output (--summary all)</label>
+        </div>
+    </div>
+
+    <div class="build-actions">
+        <button class="btn btn-primary" @onclick="StartBuild" disabled="@IsBuilding">Build</button>
+        <button class="btn btn-secondary" @onclick="CancelBuild" disabled="@(IsBuilding == false)">Cancel</button>
+        <button class="btn btn-outline-secondary" @onclick="ClearConsole">Clear Console</button>
+    </div>
+
+    <div class="build-status">@StatusMessage</div>
+    <div class="build-status">@ArtifactSummary</div>
+
+    <Xterm @ref="Terminal" Options="_terminalOptions" OnFirstRender="HandleTerminalReady" Class="xterm-host" />
+</div>
+
+@code {
+    private Xterm? Terminal;
+    private readonly TaskCompletionSource<bool> _terminalReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TerminalOptions _terminalOptions = new()
+    {
+        ConvertEOL = true,
+        CursorBlink = true,
+        CursorStyle = CursorStyle.Bar,
+        DisableStdin = true,
+        FontFamily = "Consolas, 'Courier New', monospace",
+        FontSize = 13,
+        Scrollback = 2000,
+        Theme = new Theme
+        {
+            Background = "#0c0f14",
+            Foreground = "#d8dee9",
+            Cursor = "#8fa3c7"
+        }
+    };
+    private CancellationTokenSource? BuildCancellation;
+    private Task? OutputTask;
+    private int OutputLineCount;
+
+    private string BuildZigPath = string.Empty;
+    private string BuildArgs = string.Empty;
+    private string ZigHome = string.Empty;
+    private string CacheKey = string.Empty;
+    private string WorkspaceKey = string.Empty;
+    private bool ReuseWorkspace = true;
+    private BuildArtifactCleanupMode ArtifactCleanupMode = BuildArtifactCleanupMode.OutputOnly;
+    private bool IncludeSummaryOutput = true;
+    private readonly string SessionKey = Guid.NewGuid().ToString("N");
+    private bool IsBuilding;
+    private string StatusMessage = string.Empty;
+    private string ArtifactSummary = string.Empty;
+
+    protected override void OnInitialized()
+    {
+        if (SamplePaths.TryGetSampleBuildZig(out var buildZig))
+        {
+            BuildZigPath = buildZig;
+        }
+
+        BuildArgs = "-Doptimize=Debug";
+        CacheKey = Environment.UserName;
+        WorkspaceKey = SessionKey;
+    }
+
+    private async Task StartBuild()
+    {
+        if (IsBuilding)
+        {
+            return;
+        }
+
+        IsBuilding = true;
+        StatusMessage = "Starting build...";
+        ArtifactSummary = string.Empty;
+        OutputLineCount = 0;
+
+        await ClearConsole();
+        await WriteTerminalLineAsync("Starting build...");
+        ResetCancellation();
+
+        var output = new BuildOutputChannel(new BuildOutputChannelOptions
+        {
+            Capacity = 2048,
+            SingleReader = true
+        });
+
+        OutputTask = ConsumeOutputAsync(output);
+
+        var args = SplitArguments(BuildArgs);
+        ApplySummaryOutput(args);
+        var workspaceKey = ResolveWorkspaceKey();
+        var workspaceCleanupMode = ResolveWorkspaceCleanupMode();
+        var request = BuildRequest.Create(BuildZigPath, args.ToArray()) with
+        {
+            ZigHome = ZigHome,
+            OutputSubscriber = output,
+            CacheKey = CacheKey,
+            WorkspaceKey = workspaceKey,
+            ArtifactCleanupMode = ArtifactCleanupMode,
+            WorkspaceCleanupMode = workspaceCleanupMode
+        };
+
+        var result = await Dispatcher.DispatchAsync(request, BuildCancellation!.Token);
+        output.Complete();
+
+        IsBuilding = false;
+
+        if (result.IsSuccess && result.Value.Succeeded)
+        {
+            StatusMessage = "Build succeeded.";
+            ArtifactSummary = $"Artifact bytes: {result.Value.Artifact.Bytes.Length}";
+            await WriteTerminalLineAsync($"Build succeeded in {result.Value.Duration.TotalMilliseconds:0} ms.");
+            _ = DrainOutputAsync(result.Value);
+            return;
+        }
+
+        var errorCode = result.IsSuccess ? ErrorCodes.BuildFailed : result.Error.Code;
+        var errorMessage = result.IsSuccess
+            ? "Zig build failed."
+            : result.Error.Message;
+        var outputResult = result.IsSuccess ? result.Value : result.Error.Output;
+
+        StatusMessage = $"Build failed: {errorCode} - {errorMessage}";
+        await WriteTerminalLineAsync($"Build failed: {errorCode} - {errorMessage}");
+        _ = DrainOutputAsync(outputResult);
+    }
+
+    private void CancelBuild()
+    {
+        BuildCancellation?.Cancel();
+    }
+
+    private async Task ClearConsole()
+    {
+        await EnsureTerminalReadyAsync();
+        if (Terminal is null)
+        {
+            return;
+        }
+
+        await Terminal.Clear();
+    }
+
+    private async Task ConsumeOutputAsync(BuildOutputChannel output)
+    {
+        await EnsureTerminalReadyAsync();
+        await foreach (var line in output.ReadAllAsync())
+        {
+            OutputLineCount++;
+            if (Terminal is null)
+            {
+                continue;
+            }
+
+            await InvokeAsync(() => Terminal.WriteLine(line.Text).AsTask());
+        }
+    }
+
+    private void ResetCancellation()
+    {
+        BuildCancellation?.Cancel();
+        BuildCancellation?.Dispose();
+        BuildCancellation = new CancellationTokenSource();
+    }
+
+    private string ResolveWorkspaceKey()
+    {
+        if (!ReuseWorkspace)
+        {
+            return string.Empty;
+        }
+
+        return string.IsNullOrWhiteSpace(WorkspaceKey)
+            ? SessionKey
+            : WorkspaceKey;
+    }
+
+    private WorkspaceCleanupMode ResolveWorkspaceCleanupMode()
+        => ReuseWorkspace
+            ? WorkspaceCleanupMode.Never
+            : WorkspaceCleanupMode.Default;
+
+    private Task HandleTerminalReady()
+    {
+        _terminalReady.TrySetResult(true);
+        return Task.CompletedTask;
+    }
+
+    private Task EnsureTerminalReadyAsync()
+        => _terminalReady.Task;
+
+    private async Task DrainOutputAsync(BuildResult outputResult)
+    {
+        if (OutputTask is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await OutputTask;
+            if (OutputLineCount > 0)
+            {
+                return;
+            }
+
+            await WriteBufferedOutputAsync(outputResult);
+        }
+        catch
+        {
+        }
+    }
+
+    private async Task WriteTerminalLineAsync(string message)
+    {
+        await EnsureTerminalReadyAsync();
+        if (Terminal is null)
+        {
+            return;
+        }
+
+        await InvokeAsync(() => Terminal.WriteLine(message).AsTask());
+    }
+
+    private async Task WriteBufferedOutputAsync(BuildResult output)
+    {
+        if (string.IsNullOrWhiteSpace(output.StandardOutput)
+            && string.IsNullOrWhiteSpace(output.StandardError))
+        {
+            await WriteTerminalLineAsync("zig produced no console output.");
+            return;
+        }
+
+        await WriteOutputBlockAsync(output.StandardOutput);
+        await WriteOutputBlockAsync(output.StandardError);
+    }
+
+    private async Task WriteOutputBlockAsync(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return;
+        }
+
+        foreach (var line in SplitLines(value))
+        {
+            await WriteTerminalLineAsync(line);
+        }
+    }
+
+    private static IEnumerable<string> SplitLines(string value)
+    {
+        var lines = value.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+        foreach (var line in lines)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            yield return line;
+        }
+    }
+
+    private static List<string> SplitArguments(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return [];
+        }
+
+        var results = new List<string>();
+        var current = new System.Text.StringBuilder();
+        var inQuotes = false;
+
+        foreach (var ch in value)
+        {
+            if (ch == '"')
+            {
+                inQuotes = !inQuotes;
+                continue;
+            }
+
+            if (char.IsWhiteSpace(ch) && !inQuotes)
+            {
+                AddToken(results, current);
+                continue;
+            }
+
+            current.Append(ch);
+        }
+
+        AddToken(results, current);
+        return results;
+    }
+
+    private void ApplySummaryOutput(List<string> args)
+    {
+        if (!IncludeSummaryOutput)
+        {
+            return;
+        }
+
+        if (args.Any(arg => arg.StartsWith("--summary", StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        args.Add("--summary");
+        args.Add("all");
+    }
+
+    private static void AddToken(List<string> results, System.Text.StringBuilder current)
+    {
+        if (current.Length == 0)
+        {
+            return;
+        }
+
+        results.Add(current.ToString());
+        current.Clear();
+    }
+}
